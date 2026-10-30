@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Make a new client space from the templates.
+
+  scripts/new-client <slug> [--name "Client Name"] [--holding-replies yes|no]
+
+Creates, and never overwrites:
+  clients/<slug>/                  from clients/_template/ (profile, onboarding, kb, inbox agent, ads, reports, approvals, notes)
+  inventory/clients/<slug>/        preference.json, last/, sheets/
+  inventory/rules/<slug>.json      attribution rules, empty
+and adds a row to clients/INDEX.md, then refreshes the memory lists (scripts/memory-sync).
+Client folders are private: git ignores everything in clients/ except _template and the fake example.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+SLUG = re.compile(r"[a-z0-9][a-z0-9-]{1,62}")
+INDEX_HEAD = """# Clients
+
+One row per client. The clients agent keeps it current; the dashboard reads it.
+
+| Client | Platform | Services | Status | VA lead | Next action |
+| --- | --- | --- | --- | --- | --- |
+"""
+
+
+def fill(text: str, values: dict[str, str]) -> str:
+    for key, value in values.items():
+        text = text.replace("{{" + key + "}}", value)
+    return text
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Make a new client space from the templates")
+    parser.add_argument("slug", help="short name in lowercase with dashes, for example willow-and-pine")
+    parser.add_argument("--name", help="the client's name as people write it (default: from the slug)")
+    parser.add_argument("--holding-replies", choices=("yes", "no"), default="no")
+    args = parser.parse_args()
+    slug = args.slug.strip()
+    if not SLUG.fullmatch(slug) or slug.startswith("_"):
+        print("new-client: the slug must be lowercase letters, numbers and dashes, like willow-and-pine", file=sys.stderr)
+        return 2
+    name = args.name or slug.replace("-", " ").title()
+    if "|" in name or "\n" in name:
+        print("new-client: the name cannot contain | or a line break", file=sys.stderr)
+        return 2
+    target = ROOT / "clients" / slug
+    inv = ROOT / "inventory" / "clients" / slug
+    rules = ROOT / "inventory" / "rules" / f"{slug}.json"
+    for path in (target, inv, rules):
+        if path.exists():
+            print(f"new-client: {path.relative_to(ROOT)} already exists. Nothing was changed.", file=sys.stderr)
+            return 1
+
+    values = {"CLIENT_NAME": name, "SLUG": slug, "START_DATE": dt.date.today().isoformat(),
+              "HOLDING_REPLIES": args.holding_replies}
+    shutil.copytree(ROOT / "clients" / "_template", target)
+    for path in target.rglob("*"):
+        if path.is_file() and path.suffix in {".md", ".json", ".csv", ".txt"}:
+            path.write_text(fill(path.read_text(encoding="utf-8"), values), encoding="utf-8")
+    profile = target / "profile.md"
+    profile.write_text(re.sub(r"(?m)^holding_replies: .*$", f"holding_replies: {args.holding_replies}",
+                              profile.read_text(encoding="utf-8"), count=1), encoding="utf-8")
+
+    (inv / "last").mkdir(parents=True)
+    (inv / "sheets").mkdir()
+    shutil.copy(ROOT / "inventory" / "clients" / "_template" / "preference.json", inv / "preference.json")
+    rule = json.loads((ROOT / "inventory" / "rules" / "_template.json").read_text(encoding="utf-8"))
+    rule["client"] = slug
+    rules.write_text(json.dumps(rule, indent=2) + "\n", encoding="utf-8")
+
+    index = ROOT / "clients" / "INDEX.md"
+    text = index.read_text(encoding="utf-8") if index.exists() else INDEX_HEAD
+    if not text.endswith("\n"):
+        text += "\n"
+    text += f"| [{name}]({slug}/profile.md) | to fill | to fill | onboarding | to fill | Run /client-onboard {slug} |\n"
+    index.write_text(text, encoding="utf-8")
+
+    subprocess.run([sys.executable, str(ROOT / "scripts" / "memory-sync")], cwd=ROOT, capture_output=True)
+    print(f"Made the {name} client space:")
+    print(f"  clients/{slug}/                 profile, onboarding checklist, kb, inbox agent prompt")
+    print(f"  inventory/clients/{slug}/       preference.json, last/, sheets/")
+    print(f"  inventory/rules/{slug}.json")
+    print(f"  clients/INDEX.md                new row")
+    print(f"Next: in HQ, run /client-onboard {slug}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,11 @@
+{
+  "about": "FAKE invoice for tests: the whole invoice is for one client, said on the invoice itself.",
+  "invoice_id": "T-200",
+  "supplier": "Fake Wholesale Two",
+  "date": "2026-10-21",
+  "client": "beta-shop",
+  "source_file": "drop/fake-b.jpg",
+  "lines": [
+    {"sku": "FW2-SCARF", "item": "Silk Scarf", "qty": 4, "unit_cost": 9, "confidence": 0.92}
+  ]
+}

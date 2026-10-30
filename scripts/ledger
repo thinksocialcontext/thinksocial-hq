@@ -1,0 +1,371 @@
+#!/usr/bin/env python3
+"""ThinkSocial HQ work ledger.
+
+One Markdown record per job, plus an append only JSONL journal of every event.
+Every job carries the space (herdr workspace) and folder it belongs to, and the
+client slug when the work is for one client. Run from a space's folder and both
+are filled in for you. Python standard library only. See docs/ledger.md.
+
+  ledger start --key KEY --agent NAME --title TEXT [--brief FILE] [--space SPACE] [--client SLUG] [--project NAME]
+  ledger event JOB --state STATE --note TEXT
+  ledger artifact JOB PATH [--note TEXT]
+  ledger finish JOB --status done|failed|abandoned --outcome TEXT
+  ledger show JOB [--json]
+  ledger recent [--limit N] [--space SPACE] [--client SLUG] [--json]
+  ledger view --client SLUG | --space SPACE     a Markdown table of that client's or space's jobs
+  ledger spaces                                 the spaces and their folders
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import hashlib
+import json
+import os
+import re
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+# Space (agent name) -> folder, relative to the repository root. Must match scripts/hq and
+# docs/layout.md; tests/test_spaces.py checks all three agree.
+SPACES = {
+    "hq": "",
+    "clients": "clients",
+    "inventory": "inventory",
+    "team": "team",
+    "growth": "growth",
+    "growth-research": "growth/research",
+    "ops": "ops",
+}
+SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,62}")
+STATES = ("dispatched", "running", "blocked", "waiting_approval", "done", "failed", "abandoned")
+FINAL = {"done", "failed", "abandoned"}
+
+# Refuse anything that looks like a credential. The ledger is read by every agent.
+SECRET_PATTERNS = [
+    re.compile(r"shp(at|ss|ca|pa)_[0-9a-fA-F]{8,}"),       # Shopify tokens
+    re.compile(r"sk-[A-Za-z0-9_\-]{16,}"),                   # API keys
+    re.compile(r"pk_[A-Za-z0-9]{20,}"),                      # Klaviyo style keys
+    re.compile(r"EAA[A-Za-z0-9]{30,}"),                      # Meta access tokens
+    re.compile(r"(?i)\b(password|passwd|api[_ ]?key|secret|token)\s*[:=]\s*\S+"),
+]
+
+
+class LedgerError(Exception):
+    pass
+
+
+def ledger_root() -> Path:
+    return Path(os.environ.get("HQ_LEDGER_DIR") or REPO_ROOT / "work")
+
+
+def infer_place(cwd: Path | None = None) -> tuple[str, str]:
+    """(space, client) for a working directory: the deepest space folder that holds it, and the client slug
+    when it sits inside clients/<slug>/ or inventory/clients/<slug>/. Outside the repository: ("hq", "")."""
+    try:
+        rel = (cwd or Path.cwd()).resolve().relative_to(REPO_ROOT.resolve())
+    except ValueError:
+        return "hq", ""
+    parts = rel.parts
+    space, depth = "hq", 0
+    for name, folder in SPACES.items():
+        fparts = Path(folder).parts if folder else ()
+        if parts[:len(fparts)] == fparts and len(fparts) > depth:
+            space, depth = name, len(fparts)
+    client = ""
+    for prefix in (("clients",), ("inventory", "clients")):
+        n = len(prefix)
+        if parts[:n] == prefix and len(parts) > n and SLUG.fullmatch(parts[n]):
+            client = parts[n]
+    return space, client
+
+
+def now() -> str:
+    return dt.datetime.now(dt.timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def check_secret(*texts: str | None) -> None:
+    for text in texts:
+        if not text:
+            continue
+        for pattern in SECRET_PATTERNS:
+            if pattern.search(text):
+                raise LedgerError("refused: text looks like it contains a credential. Never put secrets in the ledger.")
+
+
+def atomic_write(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".ledger.", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+class Ledger:
+    def __init__(self, root: Path):
+        self.root = root
+        self.meta = root / ".ledger"
+        self.jobs = self.meta / "jobs"
+        self.journal = self.meta / "events.jsonl"
+        self.jobs.mkdir(parents=True, exist_ok=True)
+        self._lock_handle = None
+
+    # locking keeps two agents from interleaving writes
+    def __enter__(self) -> "Ledger":
+        self._lock_handle = open(self.meta / "lock", "a+")
+        fcntl.flock(self._lock_handle, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        if self._lock_handle:
+            fcntl.flock(self._lock_handle, fcntl.LOCK_UN)
+            self._lock_handle.close()
+
+    def _append(self, entry: dict[str, Any]) -> None:
+        line = json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n"
+        with open(self.journal, "a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def state_path(self, job_id: str) -> Path:
+        if not re.fullmatch(r"job_[0-9a-f]{12}", job_id):
+            raise LedgerError(f"not a job id: {job_id}")
+        return self.jobs / f"{job_id}.json"
+
+    def load(self, job_id: str) -> dict[str, Any]:
+        path = self.state_path(job_id)
+        if not path.exists():
+            raise LedgerError(f"unknown job: {job_id}")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    def save(self, job: dict[str, Any]) -> None:
+        atomic_write(self.state_path(job["id"]), json.dumps(job, indent=2, ensure_ascii=False) + "\n")
+        atomic_write(self.root / job["file"], render(job))
+        # read back check: a record is only written when both views agree
+        if json.loads(self.state_path(job["id"]).read_text(encoding="utf-8"))["updated"] != job["updated"]:
+            raise LedgerError("read back check failed")
+
+    def start(self, key: str, agent: str, title: str, brief: str | None, project: str | None,
+              space: str = "hq", client: str = "") -> dict[str, Any]:
+        check_secret(key, title, brief)
+        if space not in SPACES:
+            raise LedgerError(f"unknown space '{space}' (expected one of: {', '.join(SPACES)})")
+        if client and not SLUG.fullmatch(client):
+            raise LedgerError(f"client must be a slug like example-boutique, not '{client}'")
+        job_id = "job_" + hashlib.sha256(key.encode()).hexdigest()[:12]
+        path = self.state_path(job_id)
+        if path.exists():
+            return self.load(job_id)  # same key, same job: start is safe to repeat
+        stamp = now()
+        slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "job"
+        job = {
+            "id": job_id, "key": key, "agent": agent, "title": title, "project": project or "",
+            "space": space, "folder": SPACES[space] or ".", "client": client,
+            "status": "dispatched", "created": stamp, "updated": stamp,
+            "file": f"{stamp[:10]}-{slug}-{job_id[4:10]}.md",
+            "brief": brief or "", "events": [], "artifacts": [], "outcome": "",
+        }
+        job["events"].append({"at": stamp, "state": "dispatched", "note": f"Dispatched to {agent}."})
+        self._append({"at": stamp, "job": job_id, "type": "start", "agent": agent, "title": title,
+                      "space": space, "client": client})
+        self.save(job)
+        return job
+
+    def _mutable(self, job_id: str) -> dict[str, Any]:
+        job = self.load(job_id)
+        if job["status"] in FINAL:
+            raise LedgerError(f"{job_id} is already {job['status']}; open a new job instead")
+        return job
+
+    def event(self, job_id: str, state: str, note: str) -> dict[str, Any]:
+        check_secret(note)
+        if state not in STATES or state in FINAL:
+            raise LedgerError(f"event state must be one of {', '.join(s for s in STATES if s not in FINAL)}")
+        job = self._mutable(job_id)
+        stamp = now()
+        job["status"], job["updated"] = state, stamp
+        job["events"].append({"at": stamp, "state": state, "note": note})
+        self._append({"at": stamp, "job": job_id, "type": "event", "state": state, "note": note})
+        self.save(job)
+        return job
+
+    def artifact(self, job_id: str, path: str, note: str | None) -> dict[str, Any]:
+        check_secret(path, note)
+        job = self._mutable(job_id)
+        if any(a["path"] == path for a in job["artifacts"]):
+            return job
+        stamp = now()
+        job["updated"] = stamp
+        job["artifacts"].append({"at": stamp, "path": path, "note": note or ""})
+        self._append({"at": stamp, "job": job_id, "type": "artifact", "path": path})
+        self.save(job)
+        return job
+
+    def finish(self, job_id: str, status: str, outcome: str) -> dict[str, Any]:
+        check_secret(outcome)
+        if status not in FINAL:
+            raise LedgerError("finish status must be done, failed or abandoned")
+        job = self.load(job_id)
+        if job["status"] == status and job["outcome"] == outcome:
+            return job
+        if job["status"] in FINAL:
+            raise LedgerError(f"{job_id} is already {job['status']}")
+        stamp = now()
+        job["status"], job["updated"], job["outcome"] = status, stamp, outcome
+        job["events"].append({"at": stamp, "state": status, "note": outcome})
+        self._append({"at": stamp, "job": job_id, "type": "finish", "status": status})
+        self.save(job)
+        return job
+
+    def recent(self, limit: int, space: str = "", client: str = "") -> list[dict[str, Any]]:
+        jobs = [json.loads(p.read_text(encoding="utf-8")) for p in self.jobs.glob("job_*.json")]
+        for job in jobs:  # records made before spaces existed belong to HQ
+            job.setdefault("space", "hq"); job.setdefault("folder", "."); job.setdefault("client", "")
+        if space:
+            jobs = [j for j in jobs if j["space"] == space]
+        if client:
+            jobs = [j for j in jobs if j["client"] == client]
+        jobs.sort(key=lambda j: j["updated"], reverse=True)
+        return jobs[:limit]
+
+
+def render(job: dict[str, Any]) -> str:
+    lines = [
+        "---",
+        f"id: {job['id']}",
+        f"agent: {job['agent']}",
+        f"status: {job['status']}",
+        f"project: {job['project']}",
+        f"space: {job.get('space', 'hq')}",
+        f"folder: {job.get('folder', '.')}",
+        f"client: {job.get('client', '')}",
+        f"created: {job['created']}",
+        f"updated: {job['updated']}",
+        "---",
+        "",
+        f"# {job['title']}",
+        "",
+        f"**Status:** {job['status']}  ",
+        f"**Agent:** {job['agent']}  ",
+        f"**Space:** {job.get('space', 'hq')} (`{job.get('folder', '.')}`)" +
+        (f"  \n**Client:** {job['client']}" if job.get("client") else ""),
+        "",
+    ]
+    if job["brief"]:
+        lines += ["## Brief", "", job["brief"].rstrip(), ""]
+    lines += ["## Events", ""]
+    lines += [f"* {e['at']} `{e['state']}` {e['note']}" for e in job["events"]]
+    lines.append("")
+    if job["artifacts"]:
+        lines += ["## Artifacts", ""]
+        lines += [f"* `{a['path']}`" + (f" {a['note']}" if a["note"] else "") for a in job["artifacts"]]
+        lines.append("")
+    if job["outcome"]:
+        lines += ["## Outcome", "", job["outcome"], ""]
+    return "\n".join(lines)
+
+
+def view(jobs: list[dict[str, Any]], heading: str) -> str:
+    lines = [f"# {heading}", "", "| Updated | Status | Agent | Space | Title | Outcome |", "| --- | --- | --- | --- | --- | --- |"]
+    for j in jobs:
+        cells = [j["updated"][:16].replace("T", " "), j["status"], j["agent"], j["space"], j["title"], j.get("outcome", "")]
+        lines.append("| " + " | ".join(str(c).replace("|", "/").replace("\n", " ") for c in cells) + " |")
+    if not jobs:
+        lines.append("| | | | | Nothing recorded yet. | |")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="ledger", description="ThinkSocial HQ work ledger")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("start")
+    p.add_argument("--key", required=True)
+    p.add_argument("--agent", required=True)
+    p.add_argument("--title", required=True)
+    p.add_argument("--brief", help="path to the brief file")
+    p.add_argument("--project")
+    p.add_argument("--space", help="the herdr workspace this job belongs to; default: from the current folder")
+    p.add_argument("--client", help="client slug; default: from the current folder when inside a client's folder")
+    p = sub.add_parser("event")
+    p.add_argument("job")
+    p.add_argument("--state", required=True)
+    p.add_argument("--note", required=True)
+    p = sub.add_parser("artifact")
+    p.add_argument("job")
+    p.add_argument("path")
+    p.add_argument("--note")
+    p = sub.add_parser("finish")
+    p.add_argument("job")
+    p.add_argument("--status", required=True)
+    p.add_argument("--outcome", required=True)
+    p = sub.add_parser("show")
+    p.add_argument("job")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("recent")
+    p.add_argument("--limit", type=int, default=10)
+    p.add_argument("--space", default="")
+    p.add_argument("--client", default="")
+    p.add_argument("--json", action="store_true")
+    p = sub.add_parser("view")
+    p.add_argument("--space", default="")
+    p.add_argument("--client", default="")
+    p.add_argument("--limit", type=int, default=200)
+    sub.add_parser("spaces")
+    args = parser.parse_args(argv)
+    if args.cmd == "spaces":
+        for name, folder in SPACES.items():
+            print(f"{name}\t{folder or '.'}")
+        return 0
+
+    try:
+        with Ledger(ledger_root()) as ledger:
+            if args.cmd == "start":
+                brief = Path(args.brief).read_text(encoding="utf-8") if args.brief else None
+                here_space, here_client = infer_place()
+                space = args.space or here_space
+                client = here_client if args.client is None else args.client
+                print(ledger.start(args.key, args.agent, args.title, brief, args.project, space, client)["id"])
+            elif args.cmd == "event":
+                print(ledger.event(args.job, args.state, args.note)["id"])
+            elif args.cmd == "artifact":
+                print(ledger.artifact(args.job, args.path, args.note)["id"])
+            elif args.cmd == "finish":
+                print(ledger.finish(args.job, args.status, args.outcome)["id"])
+            elif args.cmd == "show":
+                job = ledger.load(args.job)
+                print(json.dumps(job, indent=2, ensure_ascii=False) if args.json else render(job))
+            elif args.cmd == "recent":
+                jobs = ledger.recent(args.limit, args.space, args.client)
+                if args.json:
+                    keys = ("id", "agent", "title", "status", "updated", "outcome", "file", "space", "folder", "client")
+                    print(json.dumps([{k: j.get(k, "") for k in keys} for j in jobs], ensure_ascii=False))
+                else:
+                    for j in jobs:
+                        tag = j["space"] + (f"/{j['client']}" if j["client"] else "")
+                        print(f"{j['updated'][:16]}  {j['status']:<16} {j['agent']:<10} {tag:<24} {j['id']}  {j['title']}")
+            elif args.cmd == "view":
+                if not (args.space or args.client):
+                    raise LedgerError("view needs --client SLUG or --space SPACE")
+                jobs = ledger.recent(args.limit, args.space, args.client)
+                what = f"client {args.client}" if args.client else f"space {args.space}"
+                print(view(jobs, f"Ledger for {what}"), end="")
+    except (LedgerError, OSError) as error:
+        print(f"ledger: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

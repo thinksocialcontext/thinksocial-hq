@@ -1,0 +1,13 @@
+{
+  "client": "example-boutique",
+  "about": "FAKE example client.",
+  "sku_map": {
+    "SSC-TEE-BLK-S": "EXB-1001-BLK-S",
+    "SSC-TEE-BLK-M": "EXB-1001-BLK-M",
+    "SSC-CARD-OAT-S": "EXB-2001-OAT-S",
+    "SSC-CARD-OAT-M": "EXB-2001-OAT-M"
+  },
+  "sku_prefixes": ["EXB-"],
+  "item_keywords": ["example boutique"],
+  "suppliers": []
+}

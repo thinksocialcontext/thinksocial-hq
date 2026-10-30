@@ -1,0 +1,2 @@
+invoice_id,supplier,date,client,sku,item,qty,unit_cost,confidence,reason,note
+INV-EX-1001,Sample Supplier Co,2026-10-26,example-boutique,SSC-CARD-OAT-M,Example Cardigan Oat M,8,14.00,0.62,low confidence 0.62,Quantity smudged on the photo; could be 8 or 6.

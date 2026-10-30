@@ -1,0 +1,2 @@
+client,plan,monthly_price,billing_day,last_invoice,status,note
+example-boutique,Growth (made up),0,1,2026-10-01,current,FAKE row to show the shape

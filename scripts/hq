@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+# hq: one set of verbs for the ThinkSocial HQ agents, on herdr or on tmux.
+#
+#   hq start                 open the layout: workspaces HQ, Clients, Inventory, Team, Growth (+ Research tab), Ops
+#   hq list [--json]         every agent and its state
+#   hq read NAME [LINES]     the last lines of an agent's screen
+#   hq prompt NAME "TEXT"    type a task into an agent and press Enter
+#   hq wait NAME [SECONDS]   wait until the agent stops working (or asks a question)
+#   hq attach                look at the tmux session (tmux backend only)
+#   hq stop                  close the HQ tmux session (tmux backend only, asks first)
+#   hq backend               print which backend is in use
+#   hq layout                print agent, folder and label, one per line (used by the tests)
+#
+# Backend: HQ_BACKEND=herdr or tmux. Default is herdr when it is installed, else tmux.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The layout. One space per folder; docs/layout.md is the human readable version.
+AGENTS=(hq clients inventory team growth growth-research ops)
+AREAS=(hq clients inventory team growth ops)   # one herdr workspace (or tmux window) each
+SESSION="${HQ_TMUX_SESSION:-thinksocial-hq}"
+AGENT_CMD="${HQ_AGENT_CMD-claude}"
+AGENT_KIND="${HQ_AGENT_KIND:-claude}"
+
+die() { echo "hq: $*" >&2; exit 1; }
+
+backend() {
+  if [[ -n "${HQ_BACKEND:-}" ]]; then echo "$HQ_BACKEND"; return; fi
+  if command -v herdr >/dev/null 2>&1; then echo herdr; else echo tmux; fi
+}
+
+folder_for() {
+  case "$1" in
+    hq) echo "$ROOT" ;;
+    clients) echo "$ROOT/clients" ;;
+    inventory) echo "$ROOT/inventory" ;;
+    team) echo "$ROOT/team" ;;
+    growth) echo "$ROOT/growth" ;;
+    growth-research) echo "$ROOT/growth/research" ;;
+    ops) echo "$ROOT/ops" ;;
+    *) die "unknown agent '$1' (expected: ${AGENTS[*]})" ;;
+  esac
+}
+
+label_for() {  # herdr workspace or tab label for an agent
+  case "$1" in
+    hq) echo HQ ;;
+    clients) echo Clients ;;
+    inventory) echo Inventory ;;
+    team) echo Team ;;
+    growth) echo Growth ;;
+    growth-research) echo Research ;;
+    ops) echo Ops ;;
+    *) die "unknown agent '$1'" ;;
+  esac
+}
+
+# ---------- tmux backend ----------
+T() { if [[ -n "${HQ_TMUX_SOCKET:-}" ]]; then tmux -L "$HQ_TMUX_SOCKET" "$@"; else tmux "$@"; fi; }
+
+t_has_session() { T has-session -t "=$SESSION" 2>/dev/null; }
+
+t_target() {
+  t_has_session || die "HQ is not running. Run: scripts/hq start"
+  T list-windows -t "=$SESSION" -F '#{window_name}' | grep -qx "$1" || die "no agent named '$1'"
+  echo "=$SESSION:$1"
+}
+
+t_snapshot() { T capture-pane -p -J -t "$1" -S "-${2:-200}" 2>/dev/null; }
+
+# A question or permission dialog on screen means the human must answer it.
+t_is_blocked() {
+  tail -n 25 <<<"$1" | grep -Eq 'Do you want to|Would you like to|\(y/n\)|\[Y/n\]|❯ 1\. Yes|Allow once|Press Enter to continue|Enter to confirm|Esc to cancel'
+}
+
+# Text already typed in the input box, not yet sent.
+t_has_typed_input() {
+  tail -n 8 <<<"$1" | grep -Eq '^[│|] > [^ ]|^> [^ ]'
+}
+
+t_state() {  # name, prints idle|working|blocked using two snapshots
+  local tgt a b
+  tgt="=$SESSION:$1"
+  a="$(t_snapshot "$tgt" 60)"
+  sleep "${HQ_STATE_SAMPLE:-1}"
+  b="$(t_snapshot "$tgt" 60)"
+  if t_is_blocked "$b"; then echo blocked
+  elif [[ "$a" != "$b" ]]; then echo working
+  else echo idle; fi
+}
+
+t_start() {
+  command -v tmux >/dev/null 2>&1 || die "tmux is not installed. Run ./setup.sh"
+  local name dir made=() have=""
+  if t_has_session; then have="$(T list-windows -t "=$SESSION" -F '#{window_name}')"; fi
+  for name in "${AGENTS[@]}"; do
+    grep -qx "$name" <<<"$have" && continue
+    dir="$(folder_for "$name")"; mkdir -p "$dir"
+    if ! t_has_session; then
+      T new-session -d -s "$SESSION" -n "$name" -c "$dir" -x 220 -y 50
+    else
+      T new-window -d -t "=$SESSION:" -n "$name" -c "$dir"
+    fi
+    T set-option -t "=$SESSION:$name" automatic-rename off >/dev/null
+    [[ -n "$AGENT_CMD" ]] && T send-keys -t "=$SESSION:$name" -l "$AGENT_CMD" && T send-keys -t "=$SESSION:$name" Enter
+    made+=("$name")
+  done
+  if (( ${#made[@]} == 0 )); then echo "HQ is already running in tmux session '$SESSION'. Use: scripts/hq attach"; return; fi
+  echo "HQ started in tmux session '$SESSION' with windows: ${made[*]}"
+  echo "Look at it with: scripts/hq attach   (switch windows with Ctrl+b then the window number)"
+}
+
+t_list() {
+  local json="${1:-}" name cmd
+  t_has_session || { [[ "$json" == --json ]] && echo '[]' || echo "HQ is not running."; return 0; }
+  local names; names="$(T list-windows -t "=$SESSION" -F '#{window_name}')"
+  local -A first=() second=()
+  for name in $names; do first[$name]="$(t_snapshot "=$SESSION:$name" 60)"; done
+  sleep "${HQ_STATE_SAMPLE:-1}"
+  local rows=()
+  for name in $names; do
+    second[$name]="$(t_snapshot "=$SESSION:$name" 60)"
+    local state=idle
+    if t_is_blocked "${second[$name]}"; then state=blocked
+    elif [[ "${first[$name]}" != "${second[$name]}" ]]; then state=working; fi
+    cmd="$(T display-message -p -t "=$SESSION:$name" '#{pane_current_command}')"
+    rows+=("$name"$'\t'"$state"$'\t'"$cmd")
+  done
+  if [[ "$json" == --json ]]; then
+    printf '%s\n' "${rows[@]}" | python3 -c 'import json,sys
+print(json.dumps([dict(zip(("name","state","detail"),l.rstrip("\n").split("\t"))) for l in sys.stdin if l.strip()]))'
+  else
+    printf '%-10s %-9s %s\n' NAME STATE PROCESS
+    printf '%s\n' "${rows[@]}" | awk -F'\t' '{printf "%-10s %-9s %s\n",$1,$2,$3}'
+  fi
+}
+
+t_read() { local tgt; tgt="$(t_target "$1")"; t_snapshot "$tgt" "${2:-120}" | sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' | tail -n "${2:-120}"; }
+
+t_prompt() {
+  local tgt screen; tgt="$(t_target "$1")"; shift
+  [[ $# -ge 1 && -n "$1" ]] || die "nothing to send"
+  screen="$(t_snapshot "$tgt" 40)"
+  if t_is_blocked "$screen"; then die "'${tgt##*:}' is showing a question or permission dialog. A human must answer it first. Run: scripts/hq read ${tgt##*:}"; fi
+  if [[ "${HQ_FORCE:-0}" != 1 ]] && t_has_typed_input "$screen"; then
+    die "'${tgt##*:}' already has unsent text in its input box. Not adding to it. Run: scripts/hq read ${tgt##*:}"
+  fi
+  T send-keys -t "$tgt" -l "$1"
+  sleep 0.3
+  T send-keys -t "$tgt" Enter
+  echo "sent to ${tgt##*:}"
+}
+
+t_wait() {
+  local tgt timeout quiet elapsed=0 still=0 prev cur
+  tgt="$(t_target "$1")"; timeout="${2:-600}"; quiet="${HQ_QUIET_SECONDS:-5}"
+  prev="$(t_snapshot "$tgt" 60)"
+  while (( elapsed < timeout )); do
+    sleep 1; elapsed=$((elapsed + 1))
+    cur="$(t_snapshot "$tgt" 60)"
+    if t_is_blocked "$cur"; then echo blocked; return 0; fi
+    if [[ "$cur" == "$prev" ]]; then still=$((still + 1)); else still=0; prev="$cur"; fi
+    if (( still >= quiet )); then echo idle; return 0; fi
+  done
+  echo timeout; return 2
+}
+
+t_stop() {
+  t_has_session || { echo "HQ is not running."; return; }
+  if [[ "${HQ_YES:-0}" != 1 ]]; then
+    read -r -p "Close every HQ window, including any agent still working? [y/N] " ok
+    [[ "$ok" =~ ^[Yy]$ ]] || { echo "Left running."; return; }
+  fi
+  T kill-session -t "=$SESSION"; echo "HQ stopped."
+}
+
+# ---------- herdr backend ----------
+h_json_id() {  # read an id out of a herdr JSON reply: h_json_id '<json>' path.to.obj
+  python3 -c 'import json,sys
+d=json.loads(sys.argv[1])
+for k in sys.argv[2].split("."):
+    d=d.get(k) if isinstance(d,dict) else None
+if isinstance(d,dict):
+    d=d.get("pane_id") or d.get("workspace_id") or d.get("tab_id") or d.get("id")
+print(d or "")' "$1" "$2"
+}
+
+h_agents_json() { herdr agent list 2>/dev/null || echo '{}'; }
+
+h_agent_field() {  # h_agent_field '<agent list json>' NAME FIELD -> value or empty
+  python3 -c 'import json,sys
+try: d=json.loads(sys.argv[1])
+except Exception: sys.exit(0)
+items=d.get("result",d) if isinstance(d,dict) else d
+if isinstance(items,dict): items=items.get("agents",[])
+for a in items or []:
+    if (a.get("name") or a.get("agent_name"))==sys.argv[2]:
+        print(a.get(sys.argv[3]) or ""); break' "$1" "$2" "$3"
+}
+
+h_has_agent() { [[ -n "$(h_agent_field "$1" "$2" pane_id)$(h_agent_field "$1" "$2" name)" ]]; }
+
+h_start() {
+  herdr status server >/dev/null 2>&1 || die "herdr is not running. Open a terminal, run 'herdr', then run scripts/hq start from inside it."
+  local agents reply ws pane name dir label made=()
+  agents="$(h_agents_json)"
+  # One workspace per area, labelled like its folder, with the area's agent in the root pane.
+  for name in "${AREAS[@]}"; do
+    h_has_agent "$agents" "$name" && continue
+    dir="$(folder_for "$name")"; label="$(label_for "$name")"; mkdir -p "$dir"
+    reply="$(herdr workspace create --cwd "$dir" --label "$label" --no-focus)"
+    ws="$(h_json_id "$reply" result.workspace)"; pane="$(h_json_id "$reply" result.root_pane)"
+    [[ -n "$ws" && -n "$pane" ]] || die "could not read the new $label workspace from herdr: $reply"
+    herdr pane rename "$pane" "$label" >/dev/null || true
+    herdr agent start "$name" --kind "$AGENT_KIND" --pane "$pane" >/dev/null
+    made+=("$name")
+  done
+  # Growth has a second tab, Research, a read only research desk beside new business.
+  agents="$(h_agents_json)"
+  if ! h_has_agent "$agents" growth-research; then
+    ws="$(h_agent_field "$agents" growth workspace_id)"
+    [[ -n "$ws" ]] || die "could not find the Growth workspace to add the Research tab"
+    dir="$(folder_for growth-research)"; mkdir -p "$dir"
+    reply="$(herdr tab create --workspace "$ws" --cwd "$dir" --label Research --no-focus)"
+    pane="$(h_json_id "$reply" result.root_pane)"
+    [[ -n "$pane" ]] || die "could not read the new Research tab: $reply"
+    herdr pane rename "$pane" Research >/dev/null || true
+    herdr agent start growth-research --kind "$AGENT_KIND" --pane "$pane" >/dev/null
+    made+=(growth-research)
+  fi
+  if (( ${#made[@]} == 0 )); then echo "HQ is already running in herdr. Run: scripts/hq list"; return; fi
+  echo "HQ started in herdr. Workspaces: HQ, Clients, Inventory, Team, Growth (with a Research tab), Ops. New agents: ${made[*]}"
+}
+
+h_list() {
+  if [[ "${1:-}" == --json ]]; then
+    herdr agent list | python3 -c 'import json,sys
+d=json.load(sys.stdin)
+items=d.get("result",d) if isinstance(d,dict) else d
+if isinstance(items,dict): items=items.get("agents",[])
+out=[]
+for a in items or []:
+    out.append({"name":a.get("name") or a.get("agent_name") or a.get("pane_id",""),
+                "state":a.get("agent_status") or a.get("state") or a.get("status") or "unknown",
+                "detail":a.get("kind") or a.get("agent") or ""})
+print(json.dumps(out))'
+  else
+    herdr agent list
+  fi
+}
+
+# ---------- dispatch ----------
+cmd="${1:-help}"; shift || true
+B="$(backend)"
+case "$B:$cmd" in
+  *:backend) echo "$B" ;;
+  *:layout) for a in "${AGENTS[@]}"; do printf '%s\t%s\t%s\n' "$a" "$(folder_for "$a")" "$(label_for "$a")"; done ;;
+  tmux:start) t_start ;;
+  tmux:list) t_list "${1:-}" ;;
+  tmux:read) [[ $# -ge 1 ]] || die "usage: hq read NAME [LINES]"; t_read "$@" ;;
+  tmux:prompt) [[ $# -ge 2 ]] || die 'usage: hq prompt NAME "TEXT"'; t_prompt "$1" "$2" ;;
+  tmux:wait) [[ $# -ge 1 ]] || die "usage: hq wait NAME [SECONDS]"; t_wait "$@" ;;
+  tmux:attach) t_has_session || die "HQ is not running"; T attach -t "=$SESSION" ;;
+  tmux:stop) t_stop ;;
+  herdr:start) h_start ;;
+  herdr:list) h_list "${1:-}" ;;
+  herdr:read) [[ $# -ge 1 ]] || die "usage: hq read NAME [LINES]"; herdr agent read "$1" --source recent-unwrapped --lines "${2:-120}" ;;
+  herdr:prompt) [[ $# -ge 2 ]] || die 'usage: hq prompt NAME "TEXT"'
+    if [[ "${HQ_FORCE:-0}" != 1 ]] && t_has_typed_input "$(herdr agent read "$1" --source visible 2>/dev/null)"; then
+      die "'$1' already has unsent text in its input box. Not adding to it. Run: scripts/hq read $1"
+    fi
+    herdr agent prompt "$1" "$2" ;;
+  herdr:wait) [[ $# -ge 1 ]] || die "usage: hq wait NAME [SECONDS]"; herdr agent wait "$1" --timeout "$(( ${2:-600} * 1000 ))" ;;
+  herdr:attach|herdr:stop) die "with herdr, use the herdr window itself to look at or close the workspace" ;;
+  *:help|*:-h|*:--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command '$cmd'. Run: scripts/hq help" ;;
+esac

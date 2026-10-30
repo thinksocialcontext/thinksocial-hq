@@ -1,0 +1,5 @@
+name,role,clients,hours,tools_access,start_date
+VA Lead A (fake),VA lead,example-boutique,30,Front Desk; Shopify admin (staff); Meta Business Suite,2025-03-01
+VA B (fake),Inbox VA,example-boutique,20,Front Desk,2025-08-15
+Data Entry C (fake),Data entry,example-boutique,25,Google Drive; Shopify admin (inventory only),2026-01-10
+VA D (fake),Social VA,,15,Meta Business Suite; Canva,2026-09-01

@@ -1,0 +1,8 @@
+{
+  "client": "your-client-slug",
+  "about": "Attribution rules for one client. Strongest first: sku_map (exact vendor SKU to store SKU), sku_prefixes, item_keywords, suppliers. A line matching more than one client at its strongest level goes to review.",
+  "sku_map": {},
+  "sku_prefixes": [],
+  "item_keywords": [],
+  "suppliers": []
+}

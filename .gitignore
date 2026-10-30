@@ -1,0 +1,60 @@
+# secrets (credentials belong in 1Password, not even here)
+.env
+.env.*
+!.env.example
+
+# private working state
+memory/
+work/
+reports/*.md
+!reports/README.md
+approvals/*.md
+!approvals/README.md
+!approvals/example-onboard-example-boutique.md
+
+# clients: only the template, the fake example and the example index are committed
+clients/*
+!clients/CLAUDE.md
+!clients/README.md
+!clients/INDEX.example.md
+!clients/_template/
+!clients/example-boutique/
+
+# inventory: invoices, extracted lines, the master sheet, review files and sheets stay local
+inventory/drop/*
+!inventory/drop/README.md
+inventory/extracted/*
+!inventory/extracted/README.md
+inventory/master/*
+!inventory/master/README.md
+inventory/review/*
+!inventory/review/README.md
+inventory/clients/*
+!inventory/clients/_template/
+!inventory/clients/example-boutique/
+inventory/clients/example-boutique/sheets/
+inventory/rules/*
+!inventory/rules/_template.json
+!inventory/rules/example-boutique.json
+
+# team, growth and ops data
+team/roster.csv
+team/qa/qa-log.csv
+team/checkins/*
+!team/checkins/README.md
+growth/pipeline.md
+growth/research/*
+!growth/research/CLAUDE.md
+!growth/research/README.md
+growth/proposals/*
+!growth/proposals/README.md
+growth/outreach/*
+!growth/outreach/README.md
+ops/billing.csv
+ops/access-log.md
+ops/incidents.md
+
+# tooling
+__pycache__/
+*.pyc
+tests/private-names.txt

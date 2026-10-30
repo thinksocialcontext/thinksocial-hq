@@ -1,0 +1,13 @@
+{
+  "about": "FAKE example client. Shows the shape only.",
+  "columns": [
+    {"header": "Product", "field": "item"},
+    {"header": "Barcode / Store SKU", "field": "client_sku"},
+    {"header": "Vendor SKU", "field": "sku"},
+    {"header": "Qty", "field": "qty"},
+    {"header": "Cost Each", "field": "unit_cost"},
+    {"header": "Invoice #", "field": "invoice_id"},
+    {"header": "Entered (initials)", "field": "blank"}
+  ],
+  "sort_by": ["item"]
+}

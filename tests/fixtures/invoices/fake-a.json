@@ -1,0 +1,16 @@
+{
+  "about": "FAKE invoice for tests. Two fake clients, alpha-shop and beta-shop.",
+  "invoice_id": "T-100",
+  "supplier": "Fake Wholesale One",
+  "date": "2026-10-20",
+  "source_file": "drop/fake-a.pdf",
+  "lines": [
+    {"sku": "FW1-DRESS-RED-M", "item": "Wrap Dress Red M", "qty": 5, "unit_cost": 18, "confidence": 0.99},
+    {"sku": "ALP-HAT-01", "item": "Bucket Hat", "qty": 3, "unit_cost": 7.5, "confidence": 0.9},
+    {"sku": "BET-SOCK-02", "item": "Cozy Socks", "qty": 12, "unit_cost": 1.25, "confidence": 0.95},
+    {"sku": "FW1-BAG-TAN", "item": "Tote Bag Tan", "qty": 2, "unit_cost": 11, "confidence": 0.4, "note": "torn corner"},
+    {"sku": "SHARED-01", "item": "Gift Box", "qty": 6, "unit_cost": 2, "confidence": 0.97},
+    {"sku": "ZZZ-999", "item": "Mystery Item", "qty": 1, "unit_cost": 3, "confidence": 0.99},
+    {"sku": "ALP-PIN-07", "item": "Enamel Pin", "qty": 2.5, "unit_cost": 1, "confidence": 0.99}
+  ]
+}

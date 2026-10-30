@@ -1,0 +1,14 @@
+{
+  "about": "FAKE invoice, extracted by the inventory agent from a made up PDF.",
+  "invoice_id": "INV-EX-1001",
+  "supplier": "Sample Supplier Co",
+  "date": "2026-10-26",
+  "source_file": "drop/sample-supplier-INV-EX-1001.pdf",
+  "lines": [
+    {"sku": "SSC-TEE-BLK-S", "item": "Everyday Tee Black S", "qty": 12, "unit_cost": 6.50, "confidence": 0.98},
+    {"sku": "SSC-TEE-BLK-M", "item": "Everyday Tee Black M", "qty": 18, "unit_cost": 6.50, "confidence": 0.97},
+    {"sku": "SSC-CARD-OAT-S", "item": "Example Cardigan Oat S", "qty": 6, "unit_cost": 14.00, "confidence": 0.95},
+    {"sku": "SSC-CARD-OAT-M", "item": "Example Cardigan Oat M", "qty": 8, "unit_cost": 14.00, "confidence": 0.62,
+     "note": "Quantity smudged on the photo; could be 8 or 6."}
+  ]
+}

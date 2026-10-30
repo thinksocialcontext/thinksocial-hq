@@ -1,0 +1,13 @@
+{
+  "about": "Columns of this client's preference sheet. 'header' is the column title the client sees; 'field' is one of: item, sku, client_sku, qty, unit_cost, line_total, invoice_id, supplier, date, client, blank. When last/ holds their previous sheet, its column order wins.",
+  "columns": [
+    {"header": "Item", "field": "item"},
+    {"header": "Vendor SKU", "field": "sku"},
+    {"header": "Store SKU", "field": "client_sku"},
+    {"header": "Qty Received", "field": "qty"},
+    {"header": "Unit Cost", "field": "unit_cost"},
+    {"header": "Invoice", "field": "invoice_id"},
+    {"header": "Done", "field": "blank"}
+  ],
+  "sort_by": ["item"]
+}

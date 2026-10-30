@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+"""Write the list of memories tagged to each space (and each client) into that folder's CLAUDE.md.
+
+A memory is tagged with frontmatter:
+    space: inventory            one space, or a comma list, or "all"
+    client: example-boutique    optional, a client slug
+
+Each space's CLAUDE.md has a block between the two markers below. This script rewrites only that
+block. Client folders (clients/<slug>/CLAUDE.md) get the memories tagged with their slug.
+
+  scripts/memory-sync           update every CLAUDE.md block
+  scripts/memory-sync --check   change nothing; exit 1 if any block is out of date (used by the tests)
+  scripts/memory-sync --list    print each memory with its space and client tags
+
+Reads memory/ when it has a MEMORY.md, otherwise memory-seed/. HQ_MEMORY_DIR overrides.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import sys
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+START = "<!-- memories:start (scripts/memory-sync writes this list; do not edit by hand) -->"
+END = "<!-- memories:end -->"
+BLOCK = re.compile(re.escape(START) + r".*?" + re.escape(END), re.S)
+
+
+def spaces() -> dict[str, str]:
+    loader = SourceFileLoader("hq_ledger", str(ROOT / "scripts" / "ledger"))
+    spec = spec_from_loader("hq_ledger", loader)
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    return module.SPACES
+
+
+def memory_dir() -> Path:
+    if os.environ.get("HQ_MEMORY_DIR"):
+        return Path(os.environ["HQ_MEMORY_DIR"])
+    live = ROOT / "memory"
+    return live if (live / "MEMORY.md").exists() else ROOT / "memory-seed"
+
+
+def frontmatter(text: str) -> dict[str, str]:
+    match = re.match(r"---\r?\n(.*?)\r?\n---", text, re.S)
+    fields: dict[str, str] = {}
+    for line in (match.group(1).splitlines() if match else []):
+        if ":" in line:
+            key, value = line.split(":", 1)
+            fields[key.strip()] = value.strip().strip('"')
+    return fields
+
+
+def memories(folder: Path) -> list[dict]:
+    items = []
+    for path in sorted(folder.glob("*.md")):
+        if path.name == "MEMORY.md":
+            continue
+        meta = frontmatter(path.read_text(encoding="utf-8"))
+        tags = [t.strip() for t in meta.get("space", "").split(",") if t.strip()]
+        items.append({"file": path.name, "name": meta.get("name", path.stem),
+                      "description": meta.get("description", ""), "spaces": tags,
+                      "client": meta.get("client", "").strip()})
+    return items
+
+
+def block(items: list[dict], empty: str) -> str:
+    lines = [f"* `memory/{m['file']}`: {m['description']}" for m in items] or [f"* {empty}"]
+    return START + "\n" + "\n".join(lines) + "\n" + END
+
+
+def targets(items: list[dict]) -> list[tuple[Path, str]]:
+    out = []
+    for name, folder in spaces().items():
+        tagged = [m for m in items if name in m["spaces"] or "all" in m["spaces"]]
+        out.append((ROOT / folder / "CLAUDE.md",
+                    block(tagged, f"No memory is tagged `space: {name}` yet. Tag one with /remember.")))
+    for claude in sorted((ROOT / "clients").glob("*/CLAUDE.md")):
+        slug = claude.parent.name
+        if slug.startswith("_"):
+            continue
+        tagged = [m for m in items if m["client"] == slug]
+        out.append((claude, block(tagged, f"No memory is tagged `client: {slug}` yet. Tag one with /remember.")))
+    return out
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--check", action="store_true")
+    parser.add_argument("--list", action="store_true")
+    args = parser.parse_args()
+    items = memories(memory_dir())
+    if args.list:
+        for m in items:
+            print(f"{m['file']:<44} space={','.join(m['spaces']) or '-':<28} client={m['client'] or '-'}")
+        return 0
+    stale = []
+    for path, new in targets(items):
+        if not path.exists():
+            stale.append(f"{path.relative_to(ROOT)} is missing")
+            continue
+        text = path.read_text(encoding="utf-8")
+        if not BLOCK.search(text):
+            stale.append(f"{path.relative_to(ROOT)} has no memories block")
+            continue
+        updated = BLOCK.sub(lambda _: new, text, count=1)
+        if updated != text:
+            if args.check:
+                stale.append(f"{path.relative_to(ROOT)} is out of date")
+            else:
+                path.write_text(updated, encoding="utf-8")
+                print(f"updated {path.relative_to(ROOT)}")
+    if stale:
+        print("\n".join(stale), file=sys.stderr)
+        return 1
+    if args.check:
+        print(f"ok  every space CLAUDE.md lists its tagged memories ({memory_dir().name}/)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

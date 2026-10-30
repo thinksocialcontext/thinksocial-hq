@@ -1,0 +1,2 @@
+invoice_id,supplier,date,client,sku,item,qty,unit_cost,confidence,reason,note
+INV-EX-1002,Made Up Wholesale,2026-10-27,,MUW-JEAN-28,Wide Leg Jean 28,4,21.00,0.91,no rule matches this line,
